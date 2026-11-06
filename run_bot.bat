@@ -3,8 +3,7 @@ REM Автозапуск мафия-бота. Запускайте двойны�
 
 cd /d "%~dp0"
 
-REM Токен бота (из BotFather)
-set "BOT_TOKEN=8546215865:AAFx2l3B0H6qTK-HB3Xhp2vkCpU6GefbUQU"
+REM Токен бота берется из файла .env
 
 REM Создать venv, если нет
 if not exist ".venv\Scripts\python.exe" (
