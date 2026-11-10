@@ -26,3 +26,6 @@ Thumbs.db
 
 # Stats file (if it contains sensitive data)
 stats.json
+
+# Game logs
+game.log

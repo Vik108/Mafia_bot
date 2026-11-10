@@ -4,6 +4,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, Optional, Set
 
 from aiogram import Bot, Dispatcher, F
@@ -12,6 +13,34 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
+
+# Настройка логирования
+LOG_FILE = "game.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def log_action(chat_id: int, user_id: int, username: str, action: str, details: str = ""):
+    """Логирование действий пользователей"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_msg = f"[Chat:{chat_id}] {username} (ID:{user_id}) - {action}"
+    if details:
+        log_msg += f" | {details}"
+    logger.info(log_msg)
+
+def log_game_event(chat_id: int, event: str, details: str = ""):
+    """Логирование игровых событий"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_msg = f"[Chat:{chat_id}] GAME EVENT: {event}"
+    if details:
+        log_msg += f" | {details}"
+    logger.info(log_msg)
 
 ROLES = ["Мафия", "Доктор", "Комиссар", "Мирный"]
 MIN_PLAYERS = 4
@@ -379,69 +408,90 @@ async def send_game_report(game: Game, win_text: str):
 @dp.message(Command("newgame"), is_group)
 async def cmd_newgame(message: Message):
     chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if game and game.phase != "ended":
         await message.reply("Игра уже идёт! Сначала завершите текущую партию.")
+        log_action(chat_id, user_id, username, "Попытка создать игру", "Игра уже идёт")
         return
-    
+
     game = game_manager.new_game(chat_id)
     game.game_number = stats_manager.next_game_number(chat_id)
+    log_game_event(chat_id, "Новая игра создана", f"Игра №{game.game_number}")
+    log_action(chat_id, user_id, username, "Создал новую игру", f"Игра №{game.game_number}")
     await send_chat(game, "Новая игра мафия! Регистрация открыта. Присоединяйся командой /join")
     await send_random_sticker(game)
 
 @dp.message(Command("join"), is_group)
 async def cmd_join(message: Message):
     chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "registration":
         await message.reply("Регистрация закрыта!")
+        log_action(chat_id, user_id, username, "Попытка присоединиться", "Регистрация закрыта")
         return
-    
-    user_id = message.from_user.id
-    name = message.from_user.full_name or f"Player_{user_id}"
-    
+
     if user_id in game.players:
         await message.reply("Вы уже в игре!")
+        log_action(chat_id, user_id, username, "Попытка присоединиться", "Уже в игре")
         return
-    
-    game.players[user_id] = name
+
+    game.players[user_id] = username
     game.alive.add(user_id)
-    await message.reply(f"{name} присоединился к игре! Игроков: {len(game.players)}")
-    
+    log_action(chat_id, user_id, username, "Присоединился к игре", f"Всего игроков: {len(game.players)}")
+    await message.reply(f"{username} присоединился к игре! Игроков: {len(game.players)}")
+
     if len(game.players) >= MIN_PLAYERS and not game.started:
         game.started = True
+        log_game_event(chat_id, "Минимум игроков набран", f"{len(game.players)} игроков")
         await send_chat(game, "Минимальное количество игроков набрано! Начните игру командой /startgame")
 
 @dp.message(Command("leave"), is_group)
 async def cmd_leave(message: Message):
     chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "registration":
         await message.reply("Нельзя выйти на этом этапе!")
+        log_action(chat_id, user_id, username, "Попытка выйти", "Неверная фаза")
         return
-    
-    user_id = message.from_user.id
+
     if user_id not in game.players:
         await message.reply("Вы не в игре!")
+        log_action(chat_id, user_id, username, "Попытка выйти", "Не в игре")
         return
-    
+
     name = game.players[user_id]
     del game.players[user_id]
     game.alive.discard(user_id)
+    log_action(chat_id, user_id, username, "Вышел из игры", f"Осталось: {len(game.players)}")
     await message.reply(f"{name} вышел из игры. Игроков: {len(game.players)}")
 
 @dp.message(Command("startgame"), is_group)
 async def cmd_startgame(message: Message):
     chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "registration":
         await message.reply("Игра не на этапе регистрации!")
+        log_action(chat_id, user_id, username, "Попытка начать игру", "Неверная фаза")
         return
-    
+
     if len(game.players) < MIN_PLAYERS:
         await message.reply(f"Минимум {MIN_PLAYERS} игрока для старта!")
+        log_action(chat_id, user_id, username, "Попытка начать игру", f"Недостаточно игроков: {len(game.players)}")
         return
-    
+
+    log_action(chat_id, user_id, username, "Начал игру", f"Игроков: {len(game.players)}")
     await start_game(game)
 
 @dp.message(Command("status"), is_group)
@@ -475,20 +525,24 @@ async def cmd_forceend(message: Message):
 async def start_game(game: Game):
     game.phase = "night"
     game.started = True
-    
+
     # Распределяем роли
     player_ids = list(game.players.keys())
     random.shuffle(player_ids)
-    
+
     # 1 мафия, 1 доктор, 1 комиссар, остальные мирные
     roles = ["Мафия", "Доктор", "Комиссар"] + ["Мирный"] * (len(player_ids) - 3)
     random.shuffle(roles)
-    
+
+    role_distribution = {}
     for i, player_id in enumerate(player_ids):
         game.roles[player_id] = roles[i]
+        role_distribution[game.players[player_id]] = roles[i]
         # Инициализируем счётчик убийств для мафии
         if roles[i] == "Мафия":
             game.mafia_kills[player_id] = 0
+
+    log_game_event(game.chat_id, "Игра началась", f"Игроков: {len(player_ids)}, Роли: {role_distribution}")
     
     await send_chat(game, "Игра началась! Ночь опускается на город...")
     await send_random_sticker(game)
@@ -547,25 +601,32 @@ async def callback_mafia(callback: CallbackQuery):
     parts = callback.data.split(":")
     chat_id = int(parts[1])
     target_id = int(parts[2])
-    
+
+    user_id = callback.from_user.id
+    username = callback.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "night":
         await callback.answer("Не время для мафии!", show_alert=True)
+        log_action(chat_id, user_id, username, "Мафия: попытка убить", "Неверная фаза")
         return
-    
-    user_id = callback.from_user.id
+
     if game.roles.get(user_id) != "Мафия" or user_id not in game.alive:
         await callback.answer("Вы не мафия!", show_alert=True)
+        log_action(chat_id, user_id, username, "Мафия: попытка убить", "Не мафия или мёртв")
         return
-    
+
     if target_id not in game.alive:
         await callback.answer("Цель уже мертва!", show_alert=True)
+        log_action(chat_id, user_id, username, "Мафия: попытка убить", "Цель мертва")
         return
-    
+
+    target_name = game.players.get(target_id, "Unknown")
     game.mafia_target = target_id
-    await callback.answer(f"Выбрано: {game.players.get(target_id)}")
+    log_action(chat_id, user_id, username, "Мафия: выбрал жертву", f"Цель: {target_name} (ID:{target_id})")
+    await callback.answer(f"Выбрано: {target_name}")
     await callback.message.edit_text("😈 Ваш выбор сделан. Ожидайте утра...")
-    
+
     await check_night_complete(game)
 
 @dp.callback_query(F.data.startswith("doctor:"))
@@ -573,21 +634,27 @@ async def callback_doctor(callback: CallbackQuery):
     parts = callback.data.split(":")
     chat_id = int(parts[1])
     target_id = int(parts[2])
-    
+
+    user_id = callback.from_user.id
+    username = callback.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "night":
         await callback.answer("Не время для доктора!", show_alert=True)
+        log_action(chat_id, user_id, username, "Доктор: попытка лечить", "Неверная фаза")
         return
-    
-    user_id = callback.from_user.id
+
     if game.roles.get(user_id) != "Доктор" or user_id not in game.alive:
         await callback.answer("Вы не доктор!", show_alert=True)
+        log_action(chat_id, user_id, username, "Доктор: попытка лечить", "Не доктор или мёртв")
         return
-    
+
+    target_name = game.players.get(target_id, "Unknown")
     game.doctor_target = target_id
-    await callback.answer(f"Выбрано: {game.players.get(target_id)}")
+    log_action(chat_id, user_id, username, "Доктор: выбрал пациента", f"Пациент: {target_name} (ID:{target_id})")
+    await callback.answer(f"Выбрано: {target_name}")
     await callback.message.edit_text("🩺 Ваш выбор сделан. Ожидайте утра...")
-    
+
     await check_night_complete(game)
 
 @dp.callback_query(F.data.startswith("commissar:"))
@@ -595,23 +662,29 @@ async def callback_commissar(callback: CallbackQuery):
     parts = callback.data.split(":")
     chat_id = int(parts[1])
     target_id = int(parts[2])
-    
+
+    user_id = callback.from_user.id
+    username = callback.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "night":
         await callback.answer("Не время для комиссара!", show_alert=True)
+        log_action(chat_id, user_id, username, "Комиссар: попытка проверить", "Неверная фаза")
         return
-    
-    user_id = callback.from_user.id
+
     if game.roles.get(user_id) != "Комиссар" or user_id not in game.alive:
         await callback.answer("Вы не комиссар!", show_alert=True)
+        log_action(chat_id, user_id, username, "Комиссар: попытка проверить", "Не комиссар или мёртв")
         return
-    
+
+    target_name = game.players.get(target_id, "Unknown")
     target_role = game.roles.get(target_id, "неизвестно")
     emoji = ROLE_EMOJI.get(target_role, "")
-    
-    await callback.answer(f"{game.players.get(target_id)} — {emoji} {target_role}")
-    await callback.message.edit_text(f"🕵️ {game.players.get(target_id)} — {emoji} {target_role}")
-    
+
+    log_action(chat_id, user_id, username, "Комиссар: проверил игрока", f"Игрок: {target_name}, Роль: {target_role}")
+    await callback.answer(f"{target_name} — {emoji} {target_role}")
+    await callback.message.edit_text(f"🕵️ {target_name} — {emoji} {target_role}")
+
     game.commissar_target = target_id
     await check_night_complete(game)
 
@@ -636,41 +709,48 @@ async def process_night(game: Game):
     # Обрабатываем результаты ночи
     killed = game.mafia_target
     healed = game.doctor_target
-    
+
+    log_game_event(game.chat_id, "Обработка ночи", f"Цель мафии: {game.players.get(killed, 'None')}, Цель доктора: {game.players.get(healed, 'None')}")
+
     if killed and killed != healed:
         killed_name = game.players.get(killed)
         killed_role = game.roles.get(killed, "неизвестно")
         role_emoji = ROLE_EMOJI.get(killed_role, "")
-        
+
         game.alive.remove(killed)
         # Увеличиваем счётчик убийств для мафии
         for mafia_id, role in game.roles.items():
             if role == "Мафия" and mafia_id in game.alive:
                 game.mafia_kills[mafia_id] = game.mafia_kills.get(mafia_id, 0) + 1
                 break  # Учитываем только одно убийство за ночь
-        
+
+        log_game_event(game.chat_id, "Игрок убит ночью", f"{killed_name} (ID:{killed}), Роль: {killed_role}")
+
         # Красивое сообщение об убийстве с раскрытием роли
         night_message = (
             f"☠️ Ночью был убит {killed_name}!\n"
             f"🎭 Его роль была: {role_emoji} {killed_role}"
         )
-        
+
         await send_chat(game, night_message)
         await send_random_sticker(game)
     elif killed and killed == healed:
+        log_game_event(game.chat_id, "Доктор спас жертву", f"Цель: {game.players.get(killed)}")
         await send_chat(game, "🩺 Доктор спас жертву tonight! Никто не умер.")
     else:
+        log_game_event(game.chat_id, "Ночь прошла спокойно", "Никто не умер")
         await send_chat(game, "🌙 Ночь прошла спокойно. Никто не умер.")
-    
+
     # Проверяем победу
     victory = check_victory(game)
     if victory:
         await end_game(game, victory)
         return
-    
+
     # Начинаем день
     game.phase = "day"
     game.reset_night_actions()
+    log_game_event(game.chat_id, "Начало дня", f"Живых: {len(game.alive)}")
     await send_chat(game, "☀️ Наступает день! Время голосования.")
     await start_voting(game)
 
@@ -688,20 +768,26 @@ async def callback_vote(callback: CallbackQuery):
     parts = callback.data.split(":")
     chat_id = int(parts[1])
     target_id = int(parts[2])
-    
+
+    user_id = callback.from_user.id
+    username = callback.from_user.full_name or f"User_{user_id}"
+
     game = game_manager.get(chat_id)
     if not game or game.phase != "day":
         await callback.answer("Не время для голосования!", show_alert=True)
+        log_action(chat_id, user_id, username, "Попытка голосовать", "Неверная фаза")
         return
-    
-    voter_id = callback.from_user.id
-    if voter_id not in game.alive:
+
+    if user_id not in game.alive:
         await callback.answer("Мёртвые не голосуют!", show_alert=True)
+        log_action(chat_id, user_id, username, "Попытка голосовать", "Мёртв")
         return
-    
-    game.day_votes[voter_id] = target_id
-    await callback.answer(f"Вы проголосовали за {game.players.get(target_id) if target_id != -1 else 'воздержался'}")
-    
+
+    target_name = game.players.get(target_id, "Unknown") if target_id != -1 else "воздержался"
+    game.day_votes[user_id] = target_id
+    log_action(chat_id, user_id, username, "Проголосовал", f"За: {target_name} (ID:{target_id})")
+    await callback.answer(f"Вы проголосовали за {target_name}")
+
     # Проверяем, все ли проголосовали
     if len(game.day_votes) == len(game.alive):
         await process_voting(game)
@@ -712,44 +798,50 @@ async def process_voting(game: Game):
     for target_id in game.day_votes.values():
         if target_id != -1:  # Не считаем воздержавшихся
             votes[target_id] = votes.get(target_id, 0) + 1
-    
+
+    log_game_event(game.chat_id, "Голосование завершено", f"Проголосовало: {len(game.day_votes)}/{len(game.alive)}")
+
     if votes:
         # Находим игрока с максимальным количеством голосов
         max_votes = max(votes.values())
         eliminated = [uid for uid, count in votes.items() if count == max_votes][0]
-        
+
         eliminated_name = game.players.get(eliminated)
         eliminated_role = game.roles.get(eliminated, "неизвестно")
         role_emoji = ROLE_EMOJI.get(eliminated_role, "")
-        
+
         game.alive.remove(eliminated)
-        
+
+        log_game_event(game.chat_id, "Игрок исключён голосованием", f"{eliminated_name} (ID:{eliminated}), Роль: {eliminated_role}, Голосов: {max_votes}")
+
         # Красивое сообщение об исключении с раскрытием роли
         exclusion_message = (
             f"⚖️ Голосование завершено!\n"
             f"🔪 Исключён: {eliminated_name} ({max_votes} {'голос' if max_votes == 1 else 'голоса' if max_votes < 5 else 'голосов'})\n"
             f"🎭 Его роль была: {role_emoji} {eliminated_role}"
         )
-        
+
         await send_chat(game, exclusion_message)
-        
+
         # Добавляем случайный стикер для драмы
         await send_random_sticker(game)
     else:
+        log_game_event(game.chat_id, "Все воздержались", "Никто не исключён")
         await send_chat(game, "⚖️ Все воздержались! Никто не исключён.")
-    
+
     # Проверяем победу
     victory = check_victory(game)
     if victory:
         await end_game(game, victory)
         return
-    
+
     # Начинаем новую ночь
     game.phase = "night"
     game.reset_day_votes()
+    log_game_event(game.chat_id, "Начало ночи", f"Живых: {len(game.alive)}")
     await send_chat(game, "🌙 Наступает ночь...")
     await send_random_sticker(game)
-    
+
     # Отправляем ночные действия
     for player_id, role in game.roles.items():
         if player_id in game.alive:
@@ -773,12 +865,15 @@ async def end_game(game: Game, reason: str):
         for uid, role in game.roles.items():
             if role != "Мафия":
                 winners.add(uid)
-    
+
+    winners_names = [game.players.get(uid, "Unknown") for uid in winners]
+    log_game_event(game.chat_id, "Игра завершена", f"Причина: {reason}, Победители: {winners_names}")
+
     stats_manager.record_result(game.chat_id, game.players, winners, game.roles)
-    
+
     # Отправляем отчёт
     await send_game_report(game, reason)
-    
+
     # Завершаем игру
     game_manager.end_game(game.chat_id)
 
