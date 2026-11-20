@@ -878,13 +878,15 @@ async def end_game(game: Game, reason: str):
     game_manager.end_game(game.chat_id)
 
 async def main():
-    load_dotenv()
+    load_dotenv(override=True)  # Перезаписывать системные переменные
     global bot
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:
         print("BOT_TOKEN не найден!")
         return
-    
+
+    print(f"Токен загружен: {bot_token[:20]}... (длина: {len(bot_token)})")
+    print(f"Полный токен: {bot_token}")
     bot = Bot(token=bot_token)
     await dp.start_polling(bot)
 
