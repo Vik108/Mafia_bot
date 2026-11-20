@@ -42,57 +42,6 @@ def log_game_event(chat_id: int, event: str, details: str = ""):
         log_msg += f" | {details}"
     logger.info(log_msg)
 
-async def send_chat_typing(game: Game):
-    """Отправляет статус 'печатает...' для ваиба"""
-    try:
-        await bot.send_chat_action(game.chat_id, "typing")
-    except Exception:
-        pass
-
-async def send_chat_with_delay(game: Game, text: str, delay: float = 1.0, phase: Optional[str] = None):
-    """Отправляет сообщение с задержкой и статусом 'печатает...'"""
-    await send_chat_typing(game)
-    await asyncio.sleep(delay)
-    await send_chat(game, text, phase)
-
-async def vote_timer_task(game: Game):
-    """Таймер для голосования с отображением отсчёта"""
-    timeout = game.vote_timeout
-    elapsed = 0
-
-    while elapsed < timeout:
-        remaining = timeout - elapsed
-        waiting_votes = [uid for uid in game.alive if uid not in game.day_votes]
-
-        # Если все проголосовали - отменяем таймер
-        if not waiting_votes:
-            return
-
-        # Каждые 10 секунд показываем сообщение с таймером
-        if elapsed % 10 == 0 and elapsed > 0:
-            names = [game.players.get(uid, "Игрок") for uid in waiting_votes]
-            timer_msg = f"⏰ Осталось {remaining} сек! Ждём голос: {', '.join(names)}"
-            await bot.send_message(game.chat_id, timer_msg)
-
-        await asyncio.sleep(10)
-        elapsed += 10
-
-    # Таймер истёк - делаем рандомный выбор для не проголосовавших
-    waiting_votes = [uid for uid in game.alive if uid not in game.day_votes]
-    if waiting_votes:
-        alive_list = list(game.alive)
-        for voter_id in waiting_votes:
-            random_target = random.choice(alive_list)
-            game.day_votes[voter_id] = random_target
-            voter_name = game.players.get(voter_id, "Игрок")
-            target_name = game.players.get(random_target, "Игрок")
-            log_action(game.chat_id, voter_id, voter_name, "Автоматический голос", f"За: {target_name}")
-
-        await bot.send_message(game.chat_id, "⏰ Время вышло! Не проголосовавшие сделали случайный выбор.")
-
-    # Обрабатываем голосование
-    await process_voting(game)
-
 ROLES = ["Мафия", "Доктор", "Комиссар", "Мирный"]
 MIN_PLAYERS = 4
 STATS_FILE = "stats.json"
@@ -152,6 +101,57 @@ class GameManager:
             if timer and not timer.done():
                 timer.cancel()
             self.games[chat_id].timer_task = None
+
+async def send_chat_typing(game: Game):
+    """Отправляет статус 'печатает...' для ваиба"""
+    try:
+        await bot.send_chat_action(game.chat_id, "typing")
+    except Exception:
+        pass
+
+async def send_chat_with_delay(game: Game, text: str, delay: float = 1.0, phase: Optional[str] = None):
+    """Отправляет сообщение с задержкой и статусом 'печатает...'"""
+    await send_chat_typing(game)
+    await asyncio.sleep(delay)
+    await send_chat(game, text, phase)
+
+async def vote_timer_task(game: Game):
+    """Таймер для голосования с отображением отсчёта"""
+    timeout = game.vote_timeout
+    elapsed = 0
+
+    while elapsed < timeout:
+        remaining = timeout - elapsed
+        waiting_votes = [uid for uid in game.alive if uid not in game.day_votes]
+
+        # Если все проголосовали - отменяем таймер
+        if not waiting_votes:
+            return
+
+        # Каждые 10 секунд показываем сообщение с таймером
+        if elapsed % 10 == 0 and elapsed > 0:
+            names = [game.players.get(uid, "Игрок") for uid in waiting_votes]
+            timer_msg = f"⏰ Осталось {remaining} сек! Ждём голос: {', '.join(names)}"
+            await bot.send_message(game.chat_id, timer_msg)
+
+        await asyncio.sleep(10)
+        elapsed += 10
+
+    # Таймер истёк - делаем рандомный выбор для не проголосовавших
+    waiting_votes = [uid for uid in game.alive if uid not in game.day_votes]
+    if waiting_votes:
+        alive_list = list(game.alive)
+        for voter_id in waiting_votes:
+            random_target = random.choice(alive_list)
+            game.day_votes[voter_id] = random_target
+            voter_name = game.players.get(voter_id, "Игрок")
+            target_name = game.players.get(random_target, "Игрок")
+            log_action(game.chat_id, voter_id, voter_name, "Автоматический голос", f"За: {target_name}")
+
+        await bot.send_message(game.chat_id, "⏰ Время вышло! Не проголосовавшие сделали случайный выбор.")
+
+    # Обрабатываем голосование
+    await process_voting(game)
 
 ROLE_EMOJI = {
     "Мафия": "😈",
