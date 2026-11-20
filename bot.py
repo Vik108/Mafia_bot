@@ -10,7 +10,7 @@ from typing import Dict, Optional, Set
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReactionTypeEmoji, MessageReactionUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
@@ -42,6 +42,57 @@ def log_game_event(chat_id: int, event: str, details: str = ""):
         log_msg += f" | {details}"
     logger.info(log_msg)
 
+async def send_chat_typing(game: Game):
+    """Отправляет статус 'печатает...' для ваиба"""
+    try:
+        await bot.send_chat_action(game.chat_id, "typing")
+    except Exception:
+        pass
+
+async def send_chat_with_delay(game: Game, text: str, delay: float = 1.0, phase: Optional[str] = None):
+    """Отправляет сообщение с задержкой и статусом 'печатает...'"""
+    await send_chat_typing(game)
+    await asyncio.sleep(delay)
+    await send_chat(game, text, phase)
+
+async def vote_timer_task(game: Game):
+    """Таймер для голосования с отображением отсчёта"""
+    timeout = game.vote_timeout
+    elapsed = 0
+
+    while elapsed < timeout:
+        remaining = timeout - elapsed
+        waiting_votes = [uid for uid in game.alive if uid not in game.day_votes]
+
+        # Если все проголосовали - отменяем таймер
+        if not waiting_votes:
+            return
+
+        # Каждые 10 секунд показываем сообщение с таймером
+        if elapsed % 10 == 0 and elapsed > 0:
+            names = [game.players.get(uid, "Игрок") for uid in waiting_votes]
+            timer_msg = f"⏰ Осталось {remaining} сек! Ждём голос: {', '.join(names)}"
+            await bot.send_message(game.chat_id, timer_msg)
+
+        await asyncio.sleep(10)
+        elapsed += 10
+
+    # Таймер истёк - делаем рандомный выбор для не проголосовавших
+    waiting_votes = [uid for uid in game.alive if uid not in game.day_votes]
+    if waiting_votes:
+        alive_list = list(game.alive)
+        for voter_id in waiting_votes:
+            random_target = random.choice(alive_list)
+            game.day_votes[voter_id] = random_target
+            voter_name = game.players.get(voter_id, "Игрок")
+            target_name = game.players.get(random_target, "Игрок")
+            log_action(game.chat_id, voter_id, voter_name, "Автоматический голос", f"За: {target_name}")
+
+        await bot.send_message(game.chat_id, "⏰ Время вышло! Не проголосовавшие сделали случайный выбор.")
+
+    # Обрабатываем голосование
+    await process_voting(game)
+
 ROLES = ["Мафия", "Доктор", "Комиссар", "Мирный"]
 MIN_PLAYERS = 4
 STATS_FILE = "stats.json"
@@ -66,6 +117,9 @@ class Game:
     last_activity: float = 0.0
     status_delay: int = 60
     mafia_kills: Dict[int, int] = field(default_factory=dict)  # user_id -> kills count
+    registration_message_id: Optional[int] = None  # Message ID for reaction-based registration
+    vote_start_time: Optional[float] = None  # Время начала голосования
+    vote_timeout: int = 60  # Таймаут голосования в секундах
 
     def reset_night_actions(self) -> None:
         self.mafia_target = None
@@ -421,7 +475,21 @@ async def cmd_newgame(message: Message):
     game.game_number = stats_manager.next_game_number(chat_id)
     log_game_event(chat_id, "Новая игра создана", f"Игра №{game.game_number}")
     log_action(chat_id, user_id, username, "Создал новую игру", f"Игра №{game.game_number}")
-    await send_chat(game, "Новая игра мафия! Регистрация открыта. Присоединяйся командой /join")
+
+    # Отправляем сообщение с реакцией для регистрации
+    reg_msg = await bot.send_message(
+        game.chat_id,
+        "🎭 Новая игра мафия! Поставьте 👍 чтобы присоединиться"
+    )
+    game.registration_message_id = reg_msg.message_id
+
+    # Добавляем реакцию к сообщению
+    await bot.set_message_reaction(
+        chat_id=game.chat_id,
+        message_id=reg_msg.message_id,
+        reaction=[ReactionTypeEmoji(emoji="👍")]
+    )
+
     await send_random_sticker(game)
 
 @dp.message(Command("join"), is_group)
@@ -473,6 +541,63 @@ async def cmd_leave(message: Message):
     game.alive.discard(user_id)
     log_action(chat_id, user_id, username, "Вышел из игры", f"Осталось: {len(game.players)}")
     await message.reply(f"{name} вышел из игры. Игроков: {len(game.players)}")
+
+# Хэндлер для реакции на сообщение регистрации
+@dp.message_reaction()
+async def handle_reaction(reaction: MessageReactionUpdated):
+    chat_id = reaction.chat.id
+    user_id = reaction.user.id
+    username = reaction.user.full_name or f"User_{user_id}"
+
+    game = game_manager.get(chat_id)
+    if not game or game.phase != "registration":
+        return
+
+    # Проверяем, что реакция на сообщение регистрации
+    if game.registration_message_id != reaction.message_id:
+        return
+
+    # Проверяем реакцию 👍
+    has_thumbs_up = any(r.emoji == "👍" for r in reaction.new_reaction)
+
+    if has_thumbs_up and user_id not in game.players:
+        game.players[user_id] = username
+        game.alive.add(user_id)
+        log_action(chat_id, user_id, username, "Присоединился через реакцию", f"Всего игроков: {len(game.players)}")
+
+        if len(game.players) >= MIN_PLAYERS and not game.started:
+            game.started = True
+            log_game_event(chat_id, "Минимум игроков набран", f"{len(game.players)} игроков")
+            await send_chat(game, "Минимальное количество игроков набрано! Начните игру командой /startgame")
+
+    # Если убрали реакцию 👍 и игрок в игре
+    elif not has_thumbs_up and user_id in game.players:
+        name = game.players[user_id]
+        del game.players[user_id]
+        game.alive.discard(user_id)
+        log_action(chat_id, user_id, username, "Убрал реакцию - вышел", f"Осталось: {len(game.players)}")
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    """Обработка /start в личке для новых игроков"""
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply(
+            "🎭 Привет! Я бот для игры в Мафия.\n\n"
+            "Как играть:\n"
+            "1. Найдите групповой чат, где я добавлен\n"
+            "2. Напишите /newgame чтобы создать игру\n"
+            "3. Поставьте 👍 на сообщение регистрации чтобы присоединиться\n"
+            "4. Когда наберётся 4 игрока, напишите /startgame\n"
+            "5. Получите роль в личке и играйте!\n\n"
+            "Команды в группе:\n"
+            "/newgame - создать игру\n"
+            "/join - присоединиться (или просто поставьте 👍)\n"
+            "/leave - выйти из игры\n"
+            "/startgame - начать игру\n"
+            "/status - статус игры\n"
+            "/stats - статистика\n"
+            "/forceend - принудительно завершить игру"
+        )
 
 @dp.message(Command("startgame"), is_group)
 async def cmd_startgame(message: Message):
@@ -544,7 +669,7 @@ async def start_game(game: Game):
 
     log_game_event(game.chat_id, "Игра началась", f"Игроков: {len(player_ids)}, Роли: {role_distribution}")
     
-    await send_chat(game, "Игра началась! Ночь опускается на город...")
+    await send_chat_with_delay(game, "Игра началась! Ночь опускается на город...", delay=0.5)
     await send_random_sticker(game)
     
     # Отправляем роли игрокам в личные сообщения
@@ -756,12 +881,16 @@ async def process_night(game: Game):
 
 async def start_voting(game: Game):
     game.reset_day_votes()
+    game.vote_start_time = asyncio.get_event_loop().time()
     kb = build_player_kb(game, "vote", include_abstain=True)
     await bot.send_message(
         game.chat_id,
-        "⚖️ Голосование! Кого исключаем из города?",
+        "⚖️ Голосование! Кого исключаем из города? У вас 60 секунд.",
         reply_markup=kb.as_markup()
     )
+
+    # Запускаем таймер голосования
+    game.timer_task = asyncio.create_task(vote_timer_task(game))
 
 @dp.callback_query(F.data.startswith("vote:"))
 async def callback_vote(callback: CallbackQuery):
@@ -790,6 +919,9 @@ async def callback_vote(callback: CallbackQuery):
 
     # Проверяем, все ли проголосовали
     if len(game.day_votes) == len(game.alive):
+        # Отменяем таймер если все проголосовали
+        if game.timer_task and not game.timer_task.done():
+            game.timer_task.cancel()
         await process_voting(game)
 
 async def process_voting(game: Game):
@@ -853,6 +985,13 @@ async def process_voting(game: Game):
                 await send_commissar_action(game, player_id)
 
 async def end_game(game: Game, reason: str):
+    # Проверяем, было ли принудительное завершение
+    is_forced = "принудительно" in reason.lower() or "forceend" in reason.lower()
+
+    # Отменяем таймер голосования если есть
+    if game.timer_task and not game.timer_task.done():
+        game.timer_task.cancel()
+
     # Записываем статистику
     winners = set()
     if "мафии" in reason.lower():
@@ -871,8 +1010,11 @@ async def end_game(game: Game, reason: str):
 
     stats_manager.record_result(game.chat_id, game.players, winners, game.roles)
 
-    # Отправляем отчёт
-    await send_game_report(game, reason)
+    # Отправляем отчёт только если не принудительное завершение
+    if not is_forced:
+        await send_game_report(game, reason)
+    else:
+        await send_chat(game, "🛑 Игра принудительно завершена.")
 
     # Завершаем игру
     game_manager.end_game(game.chat_id)
