@@ -886,7 +886,6 @@ async def main():
         return
 
     print(f"Токен загружен: {bot_token[:20]}... (длина: {len(bot_token)})")
-    print(f"Полный токен: {bot_token}")
     bot = Bot(token=bot_token)
     await dp.start_polling(bot)
 
